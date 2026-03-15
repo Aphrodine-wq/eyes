@@ -278,7 +278,7 @@ class PatternEngine:
         # Build transition probability matrix from last 7 days
         cutoff = time.time() - (7 * 86400)
         rows = store.conn.execute(
-            "SELECT app_name FROM frames WHERE timestamp > ? ORDER BY timestamp ASC",
+            "SELECT app_name, timestamp FROM frames WHERE timestamp > ? ORDER BY timestamp ASC",
             (cutoff,)
         ).fetchall()
 
@@ -302,18 +302,13 @@ class PatternEngine:
 
         alternatives = [(app, round(count / total, 2)) for app, count in ranked[1:4]]
 
-        # Time-of-day boost
+        # Time-of-day boost — use timestamp already fetched in rows
         hour_transitions = Counter()
         for i in range(len(rows) - 1):
-            row_ts = store.conn.execute(
-                "SELECT timestamp FROM frames WHERE app_name = ? LIMIT 1",
-                (rows[i][0],)
-            ).fetchone()
-            if row_ts:
-                row_hour = datetime.fromtimestamp(row_ts[0]).hour
-                if abs(row_hour - current_hour) <= 1 and rows[i][0] == current_app:
-                    if rows[i + 1][0] != current_app:
-                        hour_transitions[rows[i + 1][0]] += 1
+            row_hour = datetime.fromtimestamp(rows[i][1]).hour
+            if abs(row_hour - current_hour) <= 1 and rows[i][0] == current_app:
+                if rows[i + 1][0] != current_app:
+                    hour_transitions[rows[i + 1][0]] += 1
 
         # Blend time-of-day signal
         if hour_transitions:

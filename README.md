@@ -1,8 +1,8 @@
 # Eyes
 
-Ambient screen awareness for Claude Code. A lightweight MCP server that continuously captures what's on your screen via OCR and stores it locally — giving Claude persistent memory of what you've been looking at.
+Ambient screen intelligence for Claude Code. A local system that continuously captures, classifies, and understands what's on your screen — giving Claude persistent memory, contextual awareness, and behavioral intelligence about your work.
 
-**No cloud. No images saved. Just text in a local SQLite database.**
+**No cloud. No images saved. No ML dependencies. Just text in a local SQLite database and 9 analysis engines in pure Python.**
 
 ## Why
 
@@ -311,7 +311,7 @@ eyes/
   eyes.py              # CLI and watcher loop (18 commands)
   capture.py           # Screenshot + OCR engine (Vision framework + tesseract)
   store.py             # SQLite + FTS5, sessions, focus stats, natural time parsing
-  mcp_server.py        # MCP server (27 tools)
+  mcp_server.py        # MCP server (31 tools)
   classifier.py        # Content classification (8 categories, keyword extraction)
   adaptive.py          # Adaptive capture rate (EMA, burst/idle detection)
   triggers.py          # Screen content triggers (regex -> actions)
@@ -322,6 +322,11 @@ eyes/
   semantic.py          # TF-IDF search, topic modeling (no ML dependencies)
   timeline.py          # Screen diff narratives, rich timeline reconstruction
   insights.py          # Habit loops, correlations, productivity recommendations
+  intelligence.py      # Unified "ask anything" engine — routes to all 9 engines
+  knowledge.py         # Persistent knowledge graph (entities + relationships)
+  deepwork.py          # Deep work scoring, streaks, grades, coaching nudges
+  export.py            # Export: JSON, CSV, Markdown, self-contained HTML dashboard
+  _stop_words.py       # Shared canonical stop words
   install.sh           # Setup script
   requirements.txt     # Python dependencies
   com.claude-eyes.watcher.plist  # macOS LaunchAgent
@@ -342,6 +347,11 @@ On-demand (MCP tool calls):
   Store -> Timeline Builder -> Screen Diff Narratives
   Store -> Insights Engine -> Habit Loops / Correlations / Recommendations
   Store -> Pattern Engine -> Workflow Fingerprints / Anomalies / Predictions
+  Store -> Deep Work Tracker -> Score / Grade / Streak / Coaching
+  Store -> Export Engine -> JSON / CSV / Markdown / HTML Dashboard
+
+ask_eyes("any question") ->
+  Question Classifier -> Route to 1-3 engines -> Synthesize -> Response
 ```
 
 ## Requirements

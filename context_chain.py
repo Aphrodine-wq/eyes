@@ -15,6 +15,8 @@ from collections import deque
 from typing import Optional
 from difflib import SequenceMatcher
 
+from _stop_words import STOP_WORDS as _CONTEXT_STOP_WORDS
+
 
 @dataclass
 class ContextNode:
@@ -366,7 +368,7 @@ def _extract_shared_title_terms(title1: str, title2: str) -> set[str]:
     """Extract shared meaningful terms from two window titles."""
     t1 = set(re.findall(r'\b\w{3,}\b', title1.lower()))
     t2 = set(re.findall(r'\b\w{3,}\b', title2.lower()))
-    shared = t1 & t2 - _CONTEXT_STOP_WORDS
+    shared = (t1 & t2) - _CONTEXT_STOP_WORDS
     return shared
 
 
@@ -397,13 +399,3 @@ def _infer_transition_type(prev: ContextNode, curr: ContextNode, shared: set) ->
     return "navigate"
 
 
-_CONTEXT_STOP_WORDS = {
-    "the", "and", "for", "are", "but", "not", "you", "all", "any", "can",
-    "was", "one", "our", "out", "has", "have", "had", "this", "that",
-    "with", "from", "they", "been", "said", "each", "which", "their",
-    "will", "way", "about", "many", "then", "them", "would", "like",
-    "more", "some", "time", "very", "when", "what", "your", "how",
-    "new", "now", "see", "just", "also", "back", "after", "use",
-    "file", "edit", "view", "window", "help", "menu", "tab",
-    "untitled", "document", "sheet", "application",
-}

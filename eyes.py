@@ -31,6 +31,7 @@ from triggers import TriggerEngine
 from classifier import classify_capture
 from flow import FlowDetector
 from context_chain import ContextTracker
+from knowledge import KnowledgeGraph, EntityExtractor
 
 
 def format_entry(entry, verbose=False):
@@ -94,6 +95,10 @@ def cmd_watch(args):
 
     # Context tracker
     context_tracker = ContextTracker(window_size=100)
+
+    # Knowledge graph
+    knowledge_graph = KnowledgeGraph(store.conn)
+    entity_extractor = EntityExtractor()
 
     # Use async capture so OCR doesn't block the loop on Intel
     async_cap = AsyncCapture(max_workers=1) if not use_vision else None
@@ -191,6 +196,19 @@ def cmd_watch(args):
                             result.timestamp, result.app_name,
                             result.window_title, result.text, cls.category
                         )
+
+                        # Extract entities for knowledge graph
+                        try:
+                            entities = entity_extractor.extract(
+                                result.text, result.app_name, result.window_title
+                            )
+                            if entities:
+                                knowledge_graph.record_entities(
+                                    entities, result.timestamp,
+                                    result.app_name, result.window_title
+                                )
+                        except Exception:
+                            pass
 
                         # Run triggers
                         events = trigger_engine.evaluate(

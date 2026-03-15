@@ -234,7 +234,7 @@ class EyesStore:
         ).fetchall()
 
         if not rows:
-            return {"compressed": 0, "bytes_saved": 0}
+            return {"compressed": 0, "bytes_saved": 0, "bytes_saved_mb": 0}
 
         total_saved = 0
         compressed = 0

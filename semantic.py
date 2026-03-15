@@ -14,6 +14,8 @@ from collections import Counter, defaultdict
 from dataclasses import dataclass
 from typing import Optional
 
+from _stop_words import STOP_WORDS as _SEMANTIC_STOP
+
 
 @dataclass
 class SemanticResult:
@@ -316,14 +318,3 @@ def _tokenize(text: str) -> list[str]:
     return [t for t in tokens if t not in _SEMANTIC_STOP and len(t) >= 3]
 
 
-_SEMANTIC_STOP = {
-    "the", "and", "for", "are", "but", "not", "you", "all", "any", "can",
-    "her", "was", "one", "our", "out", "has", "have", "had", "this", "that",
-    "with", "from", "they", "been", "said", "each", "which", "their",
-    "will", "way", "about", "many", "then", "them", "would", "like",
-    "more", "some", "time", "very", "when", "what", "your", "how",
-    "new", "now", "old", "see", "just", "also", "back", "after",
-    "use", "two", "first", "well", "than", "only", "come", "its",
-    "over", "such", "take", "into", "most", "make", "could",
-    "been", "does", "did", "being", "those", "there", "where", "here",
-}

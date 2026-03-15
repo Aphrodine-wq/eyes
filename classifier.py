@@ -10,6 +10,8 @@ import re
 from dataclasses import dataclass
 from typing import Optional
 
+from _stop_words import STOP_WORDS as _STOP_WORDS
+
 
 @dataclass
 class Classification:
@@ -240,20 +242,6 @@ def extract_keywords(text: str, category: str) -> list[str]:
     # Sort by frequency, return top words
     sorted_words = sorted(word_freq.items(), key=lambda x: -x[1])
     return [w for w, c in sorted_words if c >= 2][:10]
-
-
-_STOP_WORDS = {
-    "the", "and", "for", "are", "but", "not", "you", "all", "any", "can",
-    "her", "was", "one", "our", "out", "has", "have", "had", "this", "that",
-    "with", "from", "they", "been", "said", "each", "which", "their",
-    "will", "way", "about", "many", "then", "them", "would", "like",
-    "more", "some", "time", "very", "when", "what", "your", "how",
-    "new", "now", "old", "see", "just", "also", "back", "after",
-    "use", "two", "first", "well", "than", "only", "come", "its",
-    "over", "such", "take", "into", "most", "make", "could",
-    "class", "def", "return", "import", "from", "true", "false", "none",
-    "self", "print", "function", "const", "let", "var",
-}
 
 
 def classify_batch(entries: list) -> dict:

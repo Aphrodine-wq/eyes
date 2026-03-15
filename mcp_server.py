@@ -33,6 +33,10 @@ from patterns import PatternEngine
 from semantic import TFIDFIndex, TopicModeler
 from timeline import build_timeline
 from insights import InsightsEngine
+from intelligence import IntelligenceEngine
+from knowledge import KnowledgeGraph, EntityExtractor
+from deepwork import DeepWorkTracker
+from export import export_markdown, export_html_dashboard
 
 # Persistent engines (survive across MCP calls)
 _flow_detector = FlowDetector(window_minutes=15)
@@ -40,6 +44,10 @@ _context_tracker = ContextTracker(window_size=200)
 _pattern_engine = PatternEngine()
 _tfidf_index = TFIDFIndex()
 _insights_engine = InsightsEngine()
+_intelligence = IntelligenceEngine()
+_entity_extractor = EntityExtractor()
+_knowledge_graph = None  # lazy init with store connection
+_deepwork_tracker = None  # lazy init with store connection
 
 server = Server("claude-eyes")
 
@@ -524,12 +532,91 @@ async def list_tools() -> list[Tool]:
                 },
             },
         ),
+        Tool(
+            name="ask_eyes",
+            description=(
+                "The unified intelligence tool. Ask ANY natural language question about "
+                "your screen activity and it routes to the right combination of engines. "
+                "Examples: 'how was my morning?', 'what broke my focus?', 'find that error I saw', "
+                "'am I more productive today than yesterday?', 'what are my habits?', "
+                "'what will I do next?'. This is the recommended default tool — use it "
+                "unless you need a specific tool's raw output."
+            ),
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "question": {
+                        "type": "string",
+                        "description": "Any natural language question about screen activity",
+                    },
+                },
+                "required": ["question"],
+            },
+        ),
+        Tool(
+            name="query_knowledge_graph",
+            description=(
+                "Query the knowledge graph — entities (people, files, URLs, projects, "
+                "errors, commands) extracted from screen captures and their relationships. "
+                "Ask about a specific entity or get recent entities by type."
+            ),
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "query": {
+                        "type": "string",
+                        "description": "Entity to search for, or 'recent [type]' for recent entities",
+                    },
+                    "entity_type": {
+                        "type": "string",
+                        "description": "Filter by type: person, file, url, project, error, command, topic",
+                    },
+                },
+                "required": ["query"],
+            },
+        ),
+        Tool(
+            name="get_deep_work_score",
+            description=(
+                "Get today's deep work score (0-100), streak, grade, and coaching nudges. "
+                "Gamified productivity tracking. Use when the user asks about their "
+                "productivity score or deep work."
+            ),
+            inputSchema={"type": "object", "properties": {}},
+        ),
+        Tool(
+            name="export_report",
+            description=(
+                "Export activity as a Markdown report or self-contained HTML dashboard. "
+                "The HTML dashboard has charts, heatmaps, and timelines — zero JS, "
+                "opens in any browser."
+            ),
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "format": {
+                        "type": "string",
+                        "description": "'markdown' or 'html' (default: markdown)",
+                    },
+                    "hours": {
+                        "type": "integer",
+                        "description": "Hours of data to include (default: 8)",
+                        "default": 8,
+                    },
+                },
+            },
+        ),
     ]
 
 
 @server.call_tool()
 async def call_tool(name: str, arguments: dict[str, Any]) -> list[TextContent]:
     store = EyesStore()
+    global _knowledge_graph, _deepwork_tracker
+    if _knowledge_graph is None:
+        _knowledge_graph = KnowledgeGraph(store.conn)
+    if _deepwork_tracker is None:
+        _deepwork_tracker = DeepWorkTracker(store.conn)
 
     try:
         if name == "see_screen_now":
@@ -939,6 +1026,97 @@ async def call_tool(name: str, arguments: dict[str, Any]) -> list[TextContent]:
                 result = "\n".join(lines)
             else:
                 result = f"No flow interruptions detected in the last {minutes} minutes."
+
+        else:
+        elif name == "ask_eyes":
+            question = arguments["question"]
+            response = _intelligence.answer(question, store)
+            lines = [response.answer]
+            if response.sources:
+                lines.append(f"\n[Sources: {', '.join(response.sources)}]")
+            if response.follow_up_suggestions:
+                lines.append(f"\nYou could also ask: {' | '.join(response.follow_up_suggestions[:3])}")
+            result = "\n".join(lines)
+
+        elif name == "query_knowledge_graph":
+            query = arguments["query"]
+            entity_type = arguments.get("entity_type", "")
+
+            if query.startswith("recent"):
+                # "recent files", "recent people", etc.
+                parts = query.split()
+                etype = entity_type or (parts[1].rstrip("s") if len(parts) > 1 else "")
+                entities = _knowledge_graph.get_recent_entities(etype, hours=4)
+                if entities:
+                    lines = [f"Recent {etype or 'all'} entities:\n"]
+                    for e in entities[:20]:
+                        ts = datetime.fromtimestamp(e.last_seen).strftime("%H:%M")
+                        lines.append(f"  [{ts}] {e.entity_type}: {e.value} (seen {e.occurrence_count}x)")
+                    result = "\n".join(lines)
+                else:
+                    result = f"No recent entities found. The knowledge graph builds over time as the watcher runs."
+            else:
+                # Search entities
+                entities = _knowledge_graph.search_entities(query)
+                if entities:
+                    lines = [f"Knowledge graph results for '{query}':\n"]
+                    for e in entities[:15]:
+                        ts = datetime.fromtimestamp(e.last_seen).strftime("%m/%d %H:%M")
+                        lines.append(f"  {e.entity_type}: {e.value}")
+                        lines.append(f"    Seen {e.occurrence_count}x, last: {ts}, apps: {', '.join(e.apps[:3]) if hasattr(e, 'apps') else 'N/A'}")
+                        # Get related entities
+                        related = _knowledge_graph.get_related(e.value, limit=3)
+                        if related:
+                            rel_strs = [f"{r.entity_b} ({r.relation_type})" for r in related]
+                            lines.append(f"    Related: {', '.join(rel_strs)}")
+                    result = "\n".join(lines)
+                else:
+                    result = f"No entities matching '{query}' in the knowledge graph."
+
+        elif name == "get_deep_work_score":
+            _deepwork_tracker.backfill_from_captures(store)
+            score = _deepwork_tracker.get_daily_score()
+            streak = _deepwork_tracker.get_streak()
+            trend = _deepwork_tracker.get_weekly_trend()
+            nudge = _deepwork_tracker.should_nudge()
+
+            lines = [
+                f"Deep Work Score: {score.score}/100 ({score.grade})",
+                f"",
+                f"Deep focus: {score.deep_minutes:.0f}min",
+                f"Shallow work: {score.shallow_minutes:.0f}min",
+                f"Distraction: {score.distraction_minutes:.0f}min",
+                f"Sessions: {score.sessions} (longest: {score.longest_session_min:.0f}min)",
+                f"Streak: {streak} days",
+            ]
+            if trend:
+                trend_str = " ".join(f"{s}" for s in trend)
+                lines.append(f"7-day trend: [{trend_str}]")
+            if nudge:
+                lines.append(f"\nCoach: {nudge}")
+
+            leaderboard = _deepwork_tracker.get_leaderboard()
+            if leaderboard.get("best_score"):
+                lines.append(f"\nPersonal best: {leaderboard['best_score']}/100")
+            if leaderboard.get("longest_streak"):
+                lines.append(f"Longest streak: {leaderboard['longest_streak']} days")
+
+            result = "\n".join(lines)
+
+        elif name == "export_report":
+            fmt = arguments.get("format", "markdown")
+            hours = arguments.get("hours", 8)
+            minutes = hours * 60
+
+            if fmt == "html":
+                html = export_html_dashboard(store, hours)
+                import tempfile
+                path = tempfile.mktemp(suffix=".html", prefix="eyes_dashboard_")
+                with open(path, "w") as f:
+                    f.write(html)
+                result = f"HTML dashboard exported to: {path}\nOpen in any browser — self-contained, zero dependencies."
+            else:
+                result = export_markdown(store, minutes)
 
         else:
             result = f"Unknown tool: {name}"

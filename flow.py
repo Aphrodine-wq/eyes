@@ -220,7 +220,7 @@ class FlowDetector:
             app=apps.most_common(1)[0][0] if apps else "",
             category=cats.most_common(1)[0][0] if cats else "",
             duration_minutes=round(duration, 1),
-            score=self.get_flow_state().score if period_captures else 0,
+            score=0,
         )
         self.flow_periods.append(period)
 
