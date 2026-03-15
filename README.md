@@ -75,21 +75,38 @@ Add to your Claude Desktop config (`~/Library/Application Support/Claude/claude_
 | `get_recent_screen_context` | What's been on screen in the last N minutes |
 | `search_screen_history` | Full-text search across all captured screen text |
 | `get_app_activity` | Screen captures filtered by app name |
+| `get_activity_summary` | Narrative summary of recent work — apps, flow, time per app |
+| `get_focus_stats` | App focus breakdown — time, percentages, context switches |
+| `get_sessions` | Detect work sessions with gaps, show start/end and focus |
+| `get_screen_at_time` | Natural language time queries ("this morning", "yesterday") |
 | `screen_stats` | Database size, capture count, date range |
 
 ## CLI
 
 ```bash
+# Core
 python eyes.py watch                    # start watcher (10s interval)
 python eyes.py watch --interval 5       # faster polling
 python eyes.py watch --accurate         # accurate OCR (slower, better text)
 python eyes.py now                      # what's on screen right now
+
+# Search & history
 python eyes.py history 30               # last 30 minutes of activity
 python eyes.py search "react hooks"     # full-text search
 python eyes.py app Safari 60            # Safari activity, last hour
+
+# Analytics
+python eyes.py summary 60              # narrative summary of last hour
+python eyes.py focus 120               # focus breakdown with visual bars
+python eyes.py sessions                 # detect work sessions (gaps = breaks)
+
+# Management
 python eyes.py stats                    # storage stats
 python eyes.py prune 7                  # delete entries older than 7 days
 python eyes.py benchmark                # test OCR speed on your machine
+python eyes.py config --show            # view config
+python eyes.py config --ignore-add "1Password"    # skip capturing this app
+python eyes.py config --ignore-remove "1Password" # re-enable capturing
 ```
 
 ## Performance
@@ -118,6 +135,33 @@ Text only. No images.
 | 1 month | ~500MB |
 
 Auto-prune with `python eyes.py prune 7` (keeps last 7 days).
+
+## Config
+
+Eyes uses `~/.claude-eyes/config.json` for settings. Created automatically on first run.
+
+```json
+{
+  "ignore_apps": ["1Password", "Keychain Access", "LastPass", "Bitwarden"],
+  "session_gap_minutes": 5,
+  "capture_interval": 10
+}
+```
+
+- **ignore_apps** — apps that will never be captured (password managers by default)
+- **session_gap_minutes** — how long a gap before it's a new work session
+- **capture_interval** — seconds between captures (used for time estimates)
+
+## Natural Language Time Queries
+
+The `get_screen_at_time` MCP tool understands time expressions:
+
+- "this morning" / "this afternoon" / "this evening"
+- "yesterday" / "yesterday morning"
+- "last 2 hours" / "last 30 minutes" / "last 3 days"
+- "today" / "this week" / "last week"
+
+So you can ask Claude: *"what was on my screen yesterday morning?"* and it just works.
 
 ## Privacy
 

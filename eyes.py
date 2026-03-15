@@ -20,7 +20,7 @@ import argparse
 import os
 from datetime import datetime
 
-from store import EyesStore
+from store import EyesStore, load_config, is_app_ignored, CONFIG_PATH
 from capture import (
     capture_frame, capture_frame_with_vision,
     capture_screenshot, compute_phash, ocr_image, get_active_window_info,
@@ -64,12 +64,14 @@ def cmd_watch(args):
     prev_phash = ""
     captured = 0
     skipped = 0
+    ignored = 0
+    config = load_config()
 
     # Use async capture so OCR doesn't block the loop on Intel
     async_cap = AsyncCapture(max_workers=1) if not use_vision else None
 
     def handle_signal(sig, frame):
-        print(f"\n\n👁️  Stopping. Captured {captured} frames, skipped {skipped} duplicates.")
+        print(f"\n\n👁️  Stopping. Captured {captured}, skipped {skipped} dupes, ignored {ignored} (blocked apps).")
         if async_cap:
             async_cap.shutdown()
         store.close()
@@ -86,6 +88,14 @@ def cmd_watch(args):
     while True:
         try:
             ts = datetime.now().strftime("%H:%M:%S")
+
+            # Check if active app is on the ignore list
+            active_app, _ = get_active_window_info()
+            if is_app_ignored(active_app, config):
+                ignored += 1
+                print(f"  [{ts}] 🚫 skip ({active_app} is ignored)")
+                time.sleep(interval)
+                continue
 
             if use_vision:
                 # Vision API mode: synchronous (API call is the bottleneck anyway)
@@ -277,6 +287,78 @@ def cmd_prune(args):
     store.close()
 
 
+def cmd_summary(args):
+    """Show an activity summary."""
+    store = EyesStore()
+    print(store.get_activity_summary(minutes=args.minutes))
+    store.close()
+
+
+def cmd_focus(args):
+    """Show focus time breakdown."""
+    store = EyesStore()
+    focus = store.get_focus_stats(minutes=args.minutes)
+
+    print(f"🎯 Focus stats (last {args.minutes} min)\n")
+    print(f"   Total captures: {focus['total_frames']}")
+    print(f"   Context switches: {focus['switches']}\n")
+
+    for app, info in focus["apps"].items():
+        bar_len = int(info["percent"] / 3)
+        bar = "█" * bar_len
+        print(f"   {app:25s} {bar} {info['estimated_minutes']}min ({info['percent']}%)")
+    store.close()
+
+
+def cmd_sessions(args):
+    """Detect and show work sessions."""
+    store = EyesStore()
+    sessions = store.get_sessions(hours=args.hours)
+
+    if not sessions:
+        print(f"No sessions detected in the last {args.hours} hours.")
+        return
+
+    print(f"📋 Work sessions (last {args.hours} hours)\n")
+    for i, s in enumerate(sessions, 1):
+        start_str = datetime.fromtimestamp(s.start).strftime("%H:%M")
+        end_str = datetime.fromtimestamp(s.end).strftime("%H:%M")
+        print(f"   Session {i}: {start_str} - {end_str} ({s.duration_minutes}min)")
+        print(f"   {s.summary}")
+        print(f"   Apps: {', '.join(s.apps)}")
+        print()
+    store.close()
+
+
+def cmd_config(args):
+    """Show or edit config."""
+    config = load_config()
+    if args.show:
+        import json
+        print(f"📝 Config ({CONFIG_PATH}):\n")
+        print(json.dumps(config, indent=2))
+    elif args.ignore_add:
+        apps = config.get("ignore_apps", [])
+        if args.ignore_add not in apps:
+            apps.append(args.ignore_add)
+            config["ignore_apps"] = apps
+            with open(CONFIG_PATH, "w") as f:
+                json.dump(config, f, indent=2)
+            print(f"   Added '{args.ignore_add}' to ignore list.")
+        else:
+            print(f"   '{args.ignore_add}' already in ignore list.")
+    elif args.ignore_remove:
+        apps = config.get("ignore_apps", [])
+        if args.ignore_remove in apps:
+            apps.remove(args.ignore_remove)
+            config["ignore_apps"] = apps
+            with open(CONFIG_PATH, "w") as f:
+                json.dump(config, f, indent=2)
+            print(f"   Removed '{args.ignore_remove}' from ignore list.")
+        else:
+            print(f"   '{args.ignore_remove}' not in ignore list.")
+
+
 def main():
     parser = argparse.ArgumentParser(description="Claude Eyes — screen awareness for Claude (Intel Mac optimized)")
     sub = parser.add_subparsers(dest="command")
@@ -319,6 +401,24 @@ def main():
     p_prune = sub.add_parser("prune", help="Delete old entries")
     p_prune.add_argument("days", type=int, nargs="?", default=7)
 
+    # summary
+    p_summary = sub.add_parser("summary", help="Activity summary")
+    p_summary.add_argument("minutes", type=int, nargs="?", default=60)
+
+    # focus
+    p_focus = sub.add_parser("focus", help="Focus time breakdown")
+    p_focus.add_argument("minutes", type=int, nargs="?", default=60)
+
+    # sessions
+    p_sessions = sub.add_parser("sessions", help="Detect work sessions")
+    p_sessions.add_argument("hours", type=int, nargs="?", default=8)
+
+    # config
+    p_config = sub.add_parser("config", help="Show or edit config")
+    p_config.add_argument("--show", action="store_true", default=True, help="Show current config")
+    p_config.add_argument("--ignore-add", type=str, help="Add app to ignore list")
+    p_config.add_argument("--ignore-remove", type=str, help="Remove app from ignore list")
+
     args = parser.parse_args()
 
     commands = {
@@ -330,6 +430,10 @@ def main():
         "app": cmd_app,
         "stats": cmd_stats,
         "prune": cmd_prune,
+        "summary": cmd_summary,
+        "focus": cmd_focus,
+        "sessions": cmd_sessions,
+        "config": cmd_config,
     }
 
     if args.command in commands:

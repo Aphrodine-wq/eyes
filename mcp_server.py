@@ -23,7 +23,7 @@ from mcp.server import Server
 from mcp.server.stdio import stdio_server
 from mcp.types import Tool, TextContent
 
-from store import EyesStore
+from store import EyesStore, parse_natural_time
 from capture import capture_frame
 
 server = Server("claude-eyes")
@@ -134,6 +134,84 @@ async def list_tools() -> list[Tool]:
             description="Get statistics about the screen capture database.",
             inputSchema={"type": "object", "properties": {}},
         ),
+        Tool(
+            name="get_activity_summary",
+            description=(
+                "Get a narrative summary of the user's recent screen activity. "
+                "Shows the flow of work — which apps, how long, what windows. "
+                "Use this when the user asks 'what have I been doing' or 'summarize my activity'."
+            ),
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "minutes": {
+                        "type": "integer",
+                        "description": "How many minutes to summarize (default: 60)",
+                        "default": 60,
+                    },
+                },
+            },
+        ),
+        Tool(
+            name="get_focus_stats",
+            description=(
+                "Get app focus time breakdown — how long in each app, context switches, "
+                "and percentages. Use when the user asks about productivity, screen time, "
+                "or which apps they've been using most."
+            ),
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "minutes": {
+                        "type": "integer",
+                        "description": "How far back to analyze (default: 60)",
+                        "default": 60,
+                    },
+                },
+            },
+        ),
+        Tool(
+            name="get_sessions",
+            description=(
+                "Detect work sessions — contiguous periods of activity separated by gaps. "
+                "Shows when you started/stopped working and what you focused on in each session. "
+                "Use when the user asks 'how was my day' or 'when did I start working'."
+            ),
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "hours": {
+                        "type": "integer",
+                        "description": "How many hours back to look for sessions (default: 8)",
+                        "default": 8,
+                    },
+                },
+            },
+        ),
+        Tool(
+            name="get_screen_at_time",
+            description=(
+                "Get screen captures from a specific time period using natural language. "
+                "Supports: 'this morning', 'yesterday afternoon', 'last 2 hours', "
+                "'today', 'this week', 'yesterday'. Use when the user references a "
+                "specific time period."
+            ),
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "when": {
+                        "type": "string",
+                        "description": "Natural language time expression (e.g., 'this morning', 'yesterday', 'last 3 hours')",
+                    },
+                    "limit": {
+                        "type": "integer",
+                        "description": "Max results (default: 15)",
+                        "default": 15,
+                    },
+                },
+                "required": ["when"],
+            },
+        ),
     ]
 
 
@@ -185,6 +263,49 @@ async def call_tool(name: str, arguments: dict[str, Any]) -> list[TextContent]:
         elif name == "screen_stats":
             stats = store.stats()
             result = json.dumps(stats, indent=2)
+
+        elif name == "get_activity_summary":
+            minutes = arguments.get("minutes", 60)
+            result = store.get_activity_summary(minutes=minutes)
+
+        elif name == "get_focus_stats":
+            minutes = arguments.get("minutes", 60)
+            focus = store.get_focus_stats(minutes=minutes)
+            lines = [f"Focus stats (last {minutes} min):\n"]
+            lines.append(f"Total captures: {focus['total_frames']}")
+            lines.append(f"Context switches: {focus['switches']}\n")
+            for app, info in focus["apps"].items():
+                lines.append(
+                    f"  {app}: ~{info['estimated_minutes']}min "
+                    f"({info['percent']}%, {info['frames']} frames)"
+                )
+            result = "\n".join(lines)
+
+        elif name == "get_sessions":
+            hours = arguments.get("hours", 8)
+            sessions = store.get_sessions(hours=hours)
+            if not sessions:
+                result = f"No sessions detected in the last {hours} hours."
+            else:
+                lines = [f"Work sessions (last {hours} hours):\n"]
+                for i, s in enumerate(sessions, 1):
+                    start_str = datetime.fromtimestamp(s.start).strftime("%H:%M")
+                    end_str = datetime.fromtimestamp(s.end).strftime("%H:%M")
+                    lines.append(f"Session {i}: {start_str} - {end_str}")
+                    lines.append(f"  {s.summary}")
+                    lines.append(f"  Apps: {', '.join(s.apps)}")
+                    lines.append(f"  Frames: {s.frame_count}\n")
+                result = "\n".join(lines)
+
+        elif name == "get_screen_at_time":
+            when = arguments["when"]
+            limit = arguments.get("limit", 15)
+            start_ts, end_ts = parse_natural_time(when)
+            entries = store.get_by_time_range(start_ts, end_ts, limit=limit)
+            start_str = datetime.fromtimestamp(start_ts).strftime("%Y-%m-%d %H:%M")
+            end_str = datetime.fromtimestamp(end_ts).strftime("%H:%M")
+            result = f"Screen activity for '{when}' ({start_str} - {end_str}):\n\n"
+            result += format_entries(entries)
 
         else:
             result = f"Unknown tool: {name}"
