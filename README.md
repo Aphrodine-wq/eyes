@@ -291,17 +291,31 @@ Eyes is the lightweight option. If you just want Claude to know what's on your s
 
 ```
 eyes/
-  eyes.py           # CLI and watcher loop (15 commands)
-  capture.py        # Screenshot + OCR engine (Vision framework + tesseract fallback)
-  store.py          # SQLite + FTS5 database, sessions, focus stats, natural time parsing
-  mcp_server.py     # MCP server (14 tools)
-  classifier.py     # Content classification engine (pattern-based, no ML)
-  adaptive.py       # Adaptive capture rate (EMA-based, idle detection)
-  triggers.py       # Screen content trigger system (pattern match -> actions)
-  digest.py         # Daily/weekly digest generation with category analysis
-  install.sh        # Setup script
-  requirements.txt  # Python dependencies
+  eyes.py              # CLI and watcher loop (18 commands)
+  capture.py           # Screenshot + OCR engine (Vision framework + tesseract)
+  store.py             # SQLite + FTS5, sessions, focus stats, natural time parsing
+  mcp_server.py        # MCP server (22 tools)
+  classifier.py        # Content classification (8 categories, keyword extraction)
+  adaptive.py          # Adaptive capture rate (EMA, burst/idle detection)
+  triggers.py          # Screen content triggers (regex -> actions)
+  digest.py            # Daily/weekly digest reports
+  flow.py              # Flow state detection, attention profiling
+  context_chain.py     # Cross-app context tracking, forgotten context surfacing
+  patterns.py          # Workflow fingerprinting, anomaly detection, predictions
+  install.sh           # Setup script
+  requirements.txt     # Python dependencies
   com.claude-eyes.watcher.plist  # macOS LaunchAgent
+```
+
+### Engine pipeline (per capture)
+
+```
+Screenshot -> OCR -> Store
+                 |-> Classifier (tag as code/chat/browser/etc.)
+                 |-> Flow Detector (update flow state score)
+                 |-> Context Tracker (track cross-app information flow)
+                 |-> Trigger Engine (pattern match -> fire actions)
+                 |-> Adaptive Rate (adjust next capture interval)
 ```
 
 ## Requirements

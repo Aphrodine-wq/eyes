@@ -29,6 +29,8 @@ from capture import (
 from adaptive import AdaptiveState, IdleDetector
 from triggers import TriggerEngine
 from classifier import classify_capture
+from flow import FlowDetector
+from context_chain import ContextTracker
 
 
 def format_entry(entry, verbose=False):
@@ -86,6 +88,12 @@ def cmd_watch(args):
     # Trigger engine
     trigger_engine = TriggerEngine.from_config(config)
     trigger_count = len(trigger_engine.rules)
+
+    # Flow detector
+    flow_detector = FlowDetector(window_minutes=15)
+
+    # Context tracker
+    context_tracker = ContextTracker(window_size=100)
 
     # Use async capture so OCR doesn't block the loop on Intel
     async_cap = AsyncCapture(max_workers=1) if not use_vision else None
@@ -174,6 +182,15 @@ def cmd_watch(args):
 
                         # Classify the capture
                         cls = classify_capture(result.app_name, result.window_title, result.text)
+
+                        # Feed flow detector
+                        flow_detector.record(result.timestamp, result.app_name, cls.category)
+
+                        # Feed context tracker
+                        context_tracker.record(
+                            result.timestamp, result.app_name,
+                            result.window_title, result.text, cls.category
+                        )
 
                         # Run triggers
                         events = trigger_engine.evaluate(

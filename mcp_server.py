@@ -25,8 +25,16 @@ from mcp.types import Tool, TextContent
 
 from store import EyesStore, parse_natural_time, load_config
 from capture import capture_frame
-from classifier import classify_batch
+from classifier import classify_batch, classify_capture
 from digest import generate_daily_digest, generate_weekly_digest, compare_days
+from flow import FlowDetector
+from context_chain import ContextTracker
+from patterns import PatternEngine
+
+# Persistent engines (survive across MCP calls)
+_flow_detector = FlowDetector(window_minutes=15)
+_context_tracker = ContextTracker(window_size=200)
+_pattern_engine = PatternEngine()
 
 server = Server("claude-eyes")
 
@@ -300,6 +308,125 @@ async def list_tools() -> list[Tool]:
                 },
             },
         ),
+        Tool(
+            name="detect_flow_state",
+            description=(
+                "Detect the user's current cognitive flow state — deep focus, flow, "
+                "working, shallow, or scattered. Shows focus score, primary app, "
+                "disruption count, and current streak. Use when the user asks about "
+                "their focus, productivity, or flow."
+            ),
+            inputSchema={"type": "object", "properties": {}},
+        ),
+        Tool(
+            name="get_attention_profile",
+            description=(
+                "Get a comprehensive attention profile — peak focus hours, "
+                "flow-inducing apps, distraction patterns, total deep focus time. "
+                "Use when the user asks about their attention patterns or focus habits."
+            ),
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "hours": {
+                        "type": "integer",
+                        "description": "Hours to analyze (default: 8)",
+                        "default": 8,
+                    },
+                },
+            },
+        ),
+        Tool(
+            name="get_context_chain",
+            description=(
+                "Get the chain of contexts that led to the user's current screen. "
+                "Tracks how information flowed across apps — e.g., saw a bug in Slack, "
+                "searched in Chrome, opened file in VS Code. Shows shared terms that "
+                "carried across transitions. Use when the user asks 'how did I get here' "
+                "or when you need to understand the full context of what they're doing."
+            ),
+            inputSchema={"type": "object", "properties": {}},
+        ),
+        Tool(
+            name="find_forgotten_context",
+            description=(
+                "Surface things the user SAW on screen hours ago that are relevant to "
+                "what's on screen RIGHT NOW — but they may have forgotten. This is "
+                "phantom memory: Claude knows things the user forgot they saw. "
+                "Use proactively when helping with a task to surface relevant past context."
+            ),
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "current_text": {
+                        "type": "string",
+                        "description": "Current screen text or topic to find forgotten context for",
+                    },
+                    "hours": {
+                        "type": "integer",
+                        "description": "How far back to search (default: 4)",
+                        "default": 4,
+                    },
+                },
+                "required": ["current_text"],
+            },
+        ),
+        Tool(
+            name="predict_next_app",
+            description=(
+                "Predict what app the user will likely switch to next, based on "
+                "historical transition patterns and time-of-day habits. "
+                "Use when anticipating what the user needs."
+            ),
+            inputSchema={"type": "object", "properties": {}},
+        ),
+        Tool(
+            name="detect_workflows",
+            description=(
+                "Detect recurring workflow patterns — app sequences that repeat regularly. "
+                "E.g., 'research-to-code' (Chrome -> VS Code -> Terminal). "
+                "Shows frequency, typical time of day, and confidence. "
+                "Use when the user asks about their work patterns."
+            ),
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "days": {
+                        "type": "integer",
+                        "description": "Days of history to analyze (default: 7)",
+                        "default": 7,
+                    },
+                },
+            },
+        ),
+        Tool(
+            name="detect_anomalies",
+            description=(
+                "Compare today's behavior to the 7-day baseline and flag anomalies. "
+                "Detects unusual app usage, abnormal activity levels, high context "
+                "switching, and new apps. Use when the user asks 'anything weird today' "
+                "or to proactively flag behavioral changes."
+            ),
+            inputSchema={"type": "object", "properties": {}},
+        ),
+        Tool(
+            name="get_flow_breakers",
+            description=(
+                "Identify what broke the user's focus — which apps interrupted deep focus "
+                "periods. Shows the app that was interrupted, how long the focus lasted, "
+                "and what broke it. Use when the user asks about distractions."
+            ),
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "minutes": {
+                        "type": "integer",
+                        "description": "How far back to look (default: 120)",
+                        "default": 120,
+                    },
+                },
+            },
+        ),
     ]
 
 
@@ -461,6 +588,156 @@ async def call_tool(name: str, arguments: dict[str, Any]) -> list[TextContent]:
                 result = f"Recent trigger events ({len(recent)}):\n\n" + "\n".join(recent)
             else:
                 result = "No trigger events recorded yet."
+
+        elif name == "detect_flow_state":
+            # Hydrate flow detector from recent captures if empty
+            if len(_flow_detector.captures) < 5:
+                recent = store.get_recent(minutes=20, limit=100)
+                for e in reversed(recent):
+                    cls = classify_capture(e.app_name, e.window_title, e.text)
+                    _flow_detector.record(e.timestamp, e.app_name, cls.category)
+
+            flow = _flow_detector.get_flow_state()
+            result = (
+                f"Flow State: {flow.state.upper()} (score: {flow.score})\n\n"
+                f"{flow.description()}\n\n"
+                f"Score: {flow.score}/1.0\n"
+                f"State duration: {flow.duration_minutes}min\n"
+                f"Current app streak: {flow.streak_minutes}min in {flow.primary_app}\n"
+                f"Disruptions (last 15min): {flow.disruptions}\n"
+                f"Primary category: {flow.primary_category}"
+            )
+
+        elif name == "get_attention_profile":
+            hours = arguments.get("hours", 8)
+            recent = store.get_recent(minutes=hours * 60, limit=5000)
+            for e in reversed(recent):
+                cls = classify_capture(e.app_name, e.window_title, e.text)
+                _flow_detector.record(e.timestamp, e.app_name, cls.category)
+
+            profile = _flow_detector.get_attention_profile(hours)
+            lines = [
+                f"Attention Profile (last {hours}h):\n",
+                f"Average flow score: {profile.avg_flow_score}",
+                f"Peak focus hour: {profile.peak_focus_hour}:00",
+                f"Worst focus hour: {profile.worst_focus_hour}:00",
+                f"Avg session before switching: {profile.avg_session_before_switch}min",
+                f"Total deep focus: {profile.total_deep_focus_minutes}min",
+                f"Total scattered: {profile.total_scattered_minutes}min",
+            ]
+            if profile.top_flow_apps:
+                lines.append(f"\nFlow-inducing apps: {', '.join(profile.top_flow_apps)}")
+            if profile.top_distraction_apps:
+                lines.append(f"Distraction-prone apps: {', '.join(profile.top_distraction_apps)}")
+            result = "\n".join(lines)
+
+        elif name == "get_context_chain":
+            # Hydrate context tracker
+            if len(_context_tracker.window) < 5:
+                recent = store.get_recent(minutes=30, limit=100)
+                for e in reversed(recent):
+                    cls = classify_capture(e.app_name, e.window_title, e.text)
+                    _context_tracker.record(
+                        e.timestamp, e.app_name, e.window_title, e.text, cls.category
+                    )
+
+            chain = _context_tracker.get_current_chain()
+            if chain:
+                result = chain.narrative()
+            else:
+                chains = _context_tracker.get_recent_chains(5)
+                if chains:
+                    result = "No active chain. Recent chains:\n\n"
+                    result += "\n\n---\n\n".join(c.narrative() for c in chains)
+                else:
+                    result = "No context chains detected yet. Need more app transitions."
+
+        elif name == "find_forgotten_context":
+            current_text = arguments["current_text"]
+            hours = arguments.get("hours", 4)
+
+            # Hydrate tracker
+            if len(_context_tracker.window) < 10:
+                recent = store.get_recent(minutes=hours * 60, limit=500)
+                for e in reversed(recent):
+                    cls = classify_capture(e.app_name, e.window_title, e.text)
+                    _context_tracker.record(
+                        e.timestamp, e.app_name, e.window_title, e.text, cls.category
+                    )
+
+            forgotten = _context_tracker.find_forgotten_context(current_text, hours)
+            if forgotten:
+                lines = [f"Forgotten context (things you saw in the last {hours}h that are relevant now):\n"]
+                for node in forgotten:
+                    ts = datetime.fromtimestamp(node.timestamp).strftime("%H:%M")
+                    lines.append(f"  [{ts}] {node.app_name}: {node.text_fingerprint}")
+                    if node.keywords:
+                        lines.append(f"    terms: {', '.join(node.keywords[:5])}")
+                result = "\n".join(lines)
+            else:
+                result = "No forgotten context found matching the current screen."
+
+        elif name == "predict_next_app":
+            prediction = _pattern_engine.predict_next_app(store)
+            if prediction.predicted_app:
+                lines = [
+                    f"Predicted next app: {prediction.predicted_app} ({prediction.confidence:.0%} confidence)",
+                    f"Reasoning: {prediction.reasoning}",
+                ]
+                if prediction.alternatives:
+                    alts = [f"{a} ({c:.0%})" for a, c in prediction.alternatives]
+                    lines.append(f"Alternatives: {', '.join(alts)}")
+                result = "\n".join(lines)
+            else:
+                result = prediction.reasoning
+
+        elif name == "detect_workflows":
+            days = arguments.get("days", 7)
+            workflows = _pattern_engine.detect_workflows(store, days)
+            if workflows:
+                lines = [f"Detected workflows (last {days} days):\n"]
+                for wf in workflows:
+                    lines.append(f"  {wf.name}")
+                    lines.append(f"    Sequence: {' -> '.join(wf.app_sequence)}")
+                    lines.append(f"    Seen {wf.occurrences}x, typically in the {wf.time_of_day}")
+                    lines.append(f"    Confidence: {wf.confidence:.0%}")
+                    last = datetime.fromtimestamp(wf.last_seen).strftime("%Y-%m-%d %H:%M")
+                    lines.append(f"    Last seen: {last}\n")
+                result = "\n".join(lines)
+            else:
+                result = "No recurring workflows detected yet. Need more history."
+
+        elif name == "detect_anomalies":
+            anomalies = _pattern_engine.detect_anomalies(store)
+            if anomalies:
+                lines = ["Behavioral anomalies detected today:\n"]
+                for a in anomalies:
+                    icon = {"info": "i", "notable": "!", "unusual": "!!", "significant": "!!!"}
+                    lines.append(f"  [{icon.get(a.severity, '?')}] {a.description}")
+                    lines.append(f"      Expected: {a.expected_value} | Actual: {a.actual_value}")
+                result = "\n".join(lines)
+            else:
+                result = "No anomalies detected. Today looks normal compared to your 7-day baseline."
+
+        elif name == "get_flow_breakers":
+            minutes = arguments.get("minutes", 120)
+            recent = store.get_recent(minutes=minutes, limit=2000)
+            for e in reversed(recent):
+                cls = classify_capture(e.app_name, e.window_title, e.text)
+                _flow_detector.record(e.timestamp, e.app_name, cls.category)
+
+            breakers = _flow_detector.detect_flow_breakers(minutes)
+            if breakers:
+                lines = [f"Flow breakers (last {minutes}min):\n"]
+                for b in breakers:
+                    ts = datetime.fromtimestamp(b["timestamp"]).strftime("%H:%M")
+                    lines.append(
+                        f"  {ts}: {b['breaker_app']} broke {b['broken_duration_min']}min "
+                        f"focus in {b['broken_app']}"
+                    )
+                result = "\n".join(lines)
+            else:
+                result = f"No flow interruptions detected in the last {minutes} minutes."
 
         else:
             result = f"Unknown tool: {name}"
