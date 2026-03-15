@@ -26,6 +26,9 @@ from capture import (
     capture_screenshot, compute_phash, ocr_image, get_active_window_info,
     AsyncCapture
 )
+from adaptive import AdaptiveState, IdleDetector
+from triggers import TriggerEngine
+from classifier import classify_capture
 
 
 def format_entry(entry, verbose=False):
@@ -55,6 +58,7 @@ def cmd_watch(args):
     use_vision = args.with_vision
     scale = args.scale
     fast_ocr = not args.accurate
+    use_adaptive = args.adaptive
     api_key = os.environ.get("ANTHROPIC_API_KEY", "")
 
     if use_vision and not api_key:
@@ -65,13 +69,38 @@ def cmd_watch(args):
     captured = 0
     skipped = 0
     ignored = 0
+    idle_paused = 0
+    triggered = 0
     config = load_config()
+
+    # Adaptive rate engine
+    adaptive = AdaptiveState(
+        min_interval=3.0,
+        max_interval=30.0,
+        base_interval=float(interval),
+    ) if use_adaptive else None
+
+    # Idle detector
+    idle_detector = IdleDetector()
+
+    # Trigger engine
+    trigger_engine = TriggerEngine.from_config(config)
+    trigger_count = len(trigger_engine.rules)
 
     # Use async capture so OCR doesn't block the loop on Intel
     async_cap = AsyncCapture(max_workers=1) if not use_vision else None
 
     def handle_signal(sig, frame):
-        print(f"\n\n👁️  Stopping. Captured {captured}, skipped {skipped} dupes, ignored {ignored} (blocked apps).")
+        stats = f"Captured {captured}, skipped {skipped} dupes, ignored {ignored} (blocked apps)"
+        if idle_paused:
+            stats += f", idle-paused {idle_paused}"
+        if triggered:
+            stats += f", {triggered} triggers fired"
+        if adaptive:
+            astatus = adaptive.get_status()
+            stats += f", {astatus['total_adjustments']} rate adjustments"
+            stats += f", ~{astatus['estimated_time_saved']:.0f}s saved"
+        print(f"\n\n👁️  Stopping. {stats}.")
         if async_cap:
             async_cap.shutdown()
         store.close()
@@ -81,7 +110,9 @@ def cmd_watch(args):
     signal.signal(signal.SIGTERM, handle_signal)
 
     mode_str = "vision API" if use_vision else ("accurate OCR" if not fast_ocr else "fast OCR")
-    print(f"👁️  Claude Eyes watching (every {interval}s, {mode_str}, scale={scale})")
+    adaptive_str = " + adaptive rate" if use_adaptive else ""
+    trigger_str = f" + {trigger_count} triggers" if trigger_count else ""
+    print(f"👁️  Eyes watching (every {interval}s, {mode_str}{adaptive_str}{trigger_str}, scale={scale})")
     print(f"   DB: {store.db_path}")
     print(f"   Press Ctrl+C to stop\n")
 
@@ -90,11 +121,12 @@ def cmd_watch(args):
             ts = datetime.now().strftime("%H:%M:%S")
 
             # Check if active app is on the ignore list
-            active_app, _ = get_active_window_info()
+            active_app, active_window = get_active_window_info()
             if is_app_ignored(active_app, config):
                 ignored += 1
-                print(f"  [{ts}] 🚫 skip ({active_app} is ignored)")
-                time.sleep(interval)
+                if adaptive:
+                    adaptive.record_change(False)
+                time.sleep(adaptive.current_interval if adaptive else interval)
                 continue
 
             if use_vision:
@@ -122,18 +154,49 @@ def cmd_watch(args):
                 # Check for results from previous tick
                 result = async_cap.get_result()
                 if result is not None:
-                    store.insert(
-                        timestamp=result.timestamp,
-                        app_name=result.app_name,
-                        window_title=result.window_title,
-                        text=result.text,
-                        extra_context=result.extra_context,
-                        phash=result.phash,
-                    )
-                    prev_phash = result.phash
-                    captured += 1
-                    preview = result.text[:80].replace("\n", " ")
-                    print(f"  [{ts}] ✅ {result.app_name}: {preview}")
+                    # Idle detection
+                    if idle_detector.check(result.app_name, result.text, result.phash):
+                        idle_paused += 1
+                        if adaptive:
+                            adaptive.record_change(False)
+                        print(f"  [{ts}] 💤 idle (screen locked or inactive)")
+                    else:
+                        store.insert(
+                            timestamp=result.timestamp,
+                            app_name=result.app_name,
+                            window_title=result.window_title,
+                            text=result.text,
+                            extra_context=result.extra_context,
+                            phash=result.phash,
+                        )
+                        prev_phash = result.phash
+                        captured += 1
+
+                        # Classify the capture
+                        cls = classify_capture(result.app_name, result.window_title, result.text)
+
+                        # Run triggers
+                        events = trigger_engine.evaluate(
+                            result.app_name, result.window_title, result.text
+                        )
+                        if events:
+                            triggered += len(events)
+                            for ev in events:
+                                print(f"  [{ts}] ⚡ TRIGGER: {ev.rule_name} → {ev.matched_text[:60]}")
+
+                        # Adaptive rate
+                        if adaptive:
+                            adaptive.record_change(True)
+
+                        preview = result.text[:60].replace("\n", " ")
+                        cat_str = f" [{cls.category}]" if cls.category != "unknown" else ""
+                        rate_str = f" ({adaptive.current_interval:.0f}s)" if adaptive else ""
+                        print(f"  [{ts}] ✅ {result.app_name}{cat_str}: {preview}{rate_str}")
+
+                elif adaptive:
+                    # No result (duplicate) — record as no-change
+                    adaptive.record_change(False)
+                    skipped += 1
 
                 # Submit new capture job
                 async_cap.submit(
@@ -145,7 +208,8 @@ def cmd_watch(args):
         except Exception as e:
             print(f"  [{ts}] ❌ {e}")
 
-        time.sleep(interval)
+        current_interval = adaptive.current_interval if adaptive else interval
+        time.sleep(current_interval)
 
 
 def cmd_now(args):
@@ -330,6 +394,74 @@ def cmd_sessions(args):
     store.close()
 
 
+def cmd_digest(args):
+    """Generate a daily or weekly digest."""
+    from digest import generate_daily_digest, generate_weekly_digest
+    store = EyesStore()
+    if args.weekly:
+        print(generate_weekly_digest(store))
+    else:
+        if args.date:
+            date = datetime.strptime(args.date, "%Y-%m-%d")
+        else:
+            date = datetime.now()
+        print(generate_daily_digest(store, date))
+    store.close()
+
+
+def cmd_classify(args):
+    """Classify recent screen activity."""
+    from classifier import classify_batch
+    store = EyesStore()
+    entries = store.get_recent(minutes=args.minutes)
+    if not entries:
+        print(f"No captures in the last {args.minutes} minutes.")
+        return
+
+    categories = classify_batch(entries)
+    config = load_config()
+    interval = config.get("capture_interval", 10)
+
+    print(f"🏷️  Content classification (last {args.minutes} min, {len(entries)} captures)\n")
+
+    total = sum(c["count"] for c in categories.values())
+    productive = sum(c["productive_frames"] for c in categories.values())
+
+    for cat, info in sorted(categories.items(), key=lambda x: -x[1]["count"]):
+        pct = round((info["count"] / total) * 100, 1)
+        est_min = round((info["count"] * interval) / 60, 1)
+        prod_mark = " *" if info["productive_frames"] > info["count"] * 0.5 else ""
+        print(f"  {cat:12s} {pct:5.1f}% (~{est_min}min, {info['count']} frames){prod_mark}")
+
+        subs = info.get("subcategories", {})
+        for sub, count in sorted(subs.items(), key=lambda x: -x[1])[:3]:
+            if sub:
+                print(f"    └ {sub}: {count}")
+
+        kws = info.get("top_keywords", [])
+        if kws:
+            print(f"    keywords: {', '.join(kws[:6])}")
+        print()
+
+    prod_pct = round((productive / total) * 100, 1) if total else 0
+    print(f"  Productivity: {prod_pct}% (* = productive category)")
+    store.close()
+
+
+def cmd_triggers(args):
+    """Show recent trigger events."""
+    from pathlib import Path
+    log_path = Path.home() / ".claude-eyes" / "triggers.log"
+    if not log_path.exists():
+        print("No trigger events yet.")
+        return
+    lines = log_path.read_text().strip().split("\n")
+    recent = lines[-20:] if len(lines) > 20 else lines
+    print(f"⚡ Recent triggers ({len(recent)} events):\n")
+    for line in recent:
+        print(f"  {line}")
+
+
 def cmd_config(args):
     """Show or edit config."""
     config = load_config()
@@ -373,6 +505,8 @@ def main():
                          help="Screenshot scale factor (default: 0.5 = half res)")
     p_watch.add_argument("--accurate", action="store_true",
                          help="Use accurate OCR (slower but more precise)")
+    p_watch.add_argument("--adaptive", action="store_true",
+                         help="Adaptive capture rate (fast when active, slow when idle)")
 
     # now
     sub.add_parser("now", help="Capture current screen")
@@ -413,6 +547,18 @@ def main():
     p_sessions = sub.add_parser("sessions", help="Detect work sessions")
     p_sessions.add_argument("hours", type=int, nargs="?", default=8)
 
+    # digest
+    p_digest = sub.add_parser("digest", help="Generate daily/weekly digest")
+    p_digest.add_argument("--weekly", action="store_true", help="Generate weekly digest")
+    p_digest.add_argument("--date", type=str, help="Specific date (YYYY-MM-DD)")
+
+    # classify
+    p_classify = sub.add_parser("classify", help="Classify recent activity")
+    p_classify.add_argument("minutes", type=int, nargs="?", default=60)
+
+    # triggers
+    sub.add_parser("triggers", help="Show recent trigger events")
+
     # config
     p_config = sub.add_parser("config", help="Show or edit config")
     p_config.add_argument("--show", action="store_true", default=True, help="Show current config")
@@ -434,6 +580,9 @@ def main():
         "focus": cmd_focus,
         "sessions": cmd_sessions,
         "config": cmd_config,
+        "digest": cmd_digest,
+        "classify": cmd_classify,
+        "triggers": cmd_triggers,
     }
 
     if args.command in commands:

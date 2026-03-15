@@ -67,19 +67,33 @@ Add to your Claude Desktop config (`~/Library/Application Support/Claude/claude_
 }
 ```
 
-### MCP Tools
+### MCP Tools (14 tools)
 
+**Core:**
 | Tool | What it does |
 |---|---|
 | `see_screen_now` | Live screenshot + OCR of current screen |
 | `get_recent_screen_context` | What's been on screen in the last N minutes |
 | `search_screen_history` | Full-text search across all captured screen text |
 | `get_app_activity` | Screen captures filtered by app name |
+| `get_screen_at_time` | Natural language time queries ("this morning", "yesterday") |
+| `screen_stats` | Database size, capture count, date range |
+
+**Analytics:**
+| Tool | What it does |
+|---|---|
 | `get_activity_summary` | Narrative summary of recent work — apps, flow, time per app |
 | `get_focus_stats` | App focus breakdown — time, percentages, context switches |
 | `get_sessions` | Detect work sessions with gaps, show start/end and focus |
-| `get_screen_at_time` | Natural language time queries ("this morning", "yesterday") |
-| `screen_stats` | Database size, capture count, date range |
+| `classify_activity` | Classify captures into categories (code, chat, browser, etc.) with productivity score |
+
+**Reports:**
+| Tool | What it does |
+|---|---|
+| `get_daily_digest` | Full daily report — hourly heatmap, categories, productivity, sessions |
+| `get_weekly_digest` | 7-day comparison — trends, daily averages, productivity patterns |
+| `compare_days` | Side-by-side comparison of any two days |
+| `get_trigger_events` | Recent screen content trigger matches |
 
 ## CLI
 
@@ -88,6 +102,7 @@ Add to your Claude Desktop config (`~/Library/Application Support/Claude/claude_
 python eyes.py watch                    # start watcher (10s interval)
 python eyes.py watch --interval 5       # faster polling
 python eyes.py watch --accurate         # accurate OCR (slower, better text)
+python eyes.py watch --adaptive         # adaptive rate (fast when active, slow when idle)
 python eyes.py now                      # what's on screen right now
 
 # Search & history
@@ -99,6 +114,15 @@ python eyes.py app Safari 60            # Safari activity, last hour
 python eyes.py summary 60              # narrative summary of last hour
 python eyes.py focus 120               # focus breakdown with visual bars
 python eyes.py sessions                 # detect work sessions (gaps = breaks)
+python eyes.py classify 60             # content classification (code/chat/browser/etc.)
+
+# Reports
+python eyes.py digest                   # daily digest (today)
+python eyes.py digest --date 2026-03-14 # digest for specific date
+python eyes.py digest --weekly          # 7-day weekly digest
+
+# Triggers
+python eyes.py triggers                 # show recent trigger events
 
 # Management
 python eyes.py stats                    # storage stats
@@ -152,6 +176,76 @@ Eyes uses `~/.claude-eyes/config.json` for settings. Created automatically on fi
 - **session_gap_minutes** — how long a gap before it's a new work session
 - **capture_interval** — seconds between captures (used for time estimates)
 
+## Content Classification
+
+Every capture is automatically classified into content categories:
+
+| Category | Examples |
+|---|---|
+| `code` | VS Code, Xcode, Cursor, GitHub in browser |
+| `terminal` | iTerm2, Terminal, Warp |
+| `chat` | Slack, Discord, Teams, iMessage |
+| `browser` | Chrome, Safari, Arc (sub-classified by content) |
+| `docs` | Notion, Obsidian, Google Docs, Word |
+| `design` | Figma, Sketch, Photoshop |
+| `email` | Mail, Gmail, Outlook |
+| `media` | Spotify, YouTube, Netflix |
+
+Browser content is further classified by window title (GitHub = code, Gmail = email, YouTube = media).
+
+Each capture also gets a **productivity score** — categories like code, terminal, docs, and design are considered productive. Ask Claude "how productive was my morning?" and it knows.
+
+## Adaptive Capture Rate
+
+With `--adaptive`, the watcher dynamically adjusts its capture interval:
+
+- **Active** (lots of screen changes): captures every 3-5 seconds
+- **Moderate**: base interval (default 10s)
+- **Idle** (no changes): slows to 30s
+- **Screen locked**: pauses entirely
+
+Uses an exponential moving average of change frequency with burst detection and idle detection. Saves CPU and storage when you're not actively working, captures more when you are.
+
+## Triggers
+
+Define rules in `~/.claude-eyes/config.json` that fire when patterns appear on screen:
+
+```json
+{
+  "triggers": [
+    {
+      "name": "build-failure",
+      "pattern": "BUILD FAILED|error:.*fatal|FAIL.*test",
+      "action": "log",
+      "cooldown_seconds": 60
+    },
+    {
+      "name": "meeting-starting",
+      "pattern": "zoom.*meeting|teams.*meeting",
+      "match_on": "window_title",
+      "action": "command",
+      "command": "osascript -e 'display notification \"Meeting detected\" with title \"Eyes\"'",
+      "cooldown_seconds": 300
+    }
+  ]
+}
+```
+
+Trigger actions:
+- **log** — write to `~/.claude-eyes/triggers.log`
+- **command** — run a shell command (notifications, scripts, webhooks)
+- **flag** — set a flag the MCP server can report to Claude
+
+## Daily & Weekly Digests
+
+Generate structured reports:
+
+- **Daily digest**: hourly heatmap, category breakdown, productivity score, top apps, session timeline
+- **Weekly digest**: 7-day comparison table with active time, productivity, and trends
+- **Day comparison**: side-by-side metrics between any two days
+
+Ask Claude "give me my daily digest" or "compare today to yesterday".
+
 ## Natural Language Time Queries
 
 The `get_screen_at_time` MCP tool understands time expressions:
@@ -197,10 +291,14 @@ Eyes is the lightweight option. If you just want Claude to know what's on your s
 
 ```
 eyes/
-  eyes.py           # CLI and watcher loop
-  capture.py        # Screenshot + OCR engine
-  store.py          # SQLite + FTS5 database
-  mcp_server.py     # MCP server (5 tools)
+  eyes.py           # CLI and watcher loop (15 commands)
+  capture.py        # Screenshot + OCR engine (Vision framework + tesseract fallback)
+  store.py          # SQLite + FTS5 database, sessions, focus stats, natural time parsing
+  mcp_server.py     # MCP server (14 tools)
+  classifier.py     # Content classification engine (pattern-based, no ML)
+  adaptive.py       # Adaptive capture rate (EMA-based, idle detection)
+  triggers.py       # Screen content trigger system (pattern match -> actions)
+  digest.py         # Daily/weekly digest generation with category analysis
   install.sh        # Setup script
   requirements.txt  # Python dependencies
   com.claude-eyes.watcher.plist  # macOS LaunchAgent

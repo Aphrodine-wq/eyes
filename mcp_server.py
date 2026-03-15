@@ -23,8 +23,10 @@ from mcp.server import Server
 from mcp.server.stdio import stdio_server
 from mcp.types import Tool, TextContent
 
-from store import EyesStore, parse_natural_time
+from store import EyesStore, parse_natural_time, load_config
 from capture import capture_frame
+from classifier import classify_batch
+from digest import generate_daily_digest, generate_weekly_digest, compare_days
 
 server = Server("claude-eyes")
 
@@ -212,6 +214,92 @@ async def list_tools() -> list[Tool]:
                 "required": ["when"],
             },
         ),
+        Tool(
+            name="classify_activity",
+            description=(
+                "Classify recent screen activity into content categories "
+                "(code, chat, browser, docs, media, terminal, design, email). "
+                "Shows productivity score, subcategories, and extracted keywords. "
+                "Use when the user asks 'what kind of work have I been doing' or "
+                "'how productive was I'."
+            ),
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "minutes": {
+                        "type": "integer",
+                        "description": "How far back to classify (default: 60)",
+                        "default": 60,
+                    },
+                },
+            },
+        ),
+        Tool(
+            name="get_daily_digest",
+            description=(
+                "Generate a comprehensive daily activity digest with hourly heatmap, "
+                "category breakdown, productivity score, top apps, and session timeline. "
+                "Use when the user asks 'how was my day' or 'daily report'."
+            ),
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "date": {
+                        "type": "string",
+                        "description": "Date in YYYY-MM-DD format (default: today)",
+                    },
+                },
+            },
+        ),
+        Tool(
+            name="get_weekly_digest",
+            description=(
+                "Generate a weekly activity digest comparing all 7 days — "
+                "active time, productivity, top apps per day. "
+                "Use when the user asks about their week or weekly patterns."
+            ),
+            inputSchema={"type": "object", "properties": {}},
+        ),
+        Tool(
+            name="compare_days",
+            description=(
+                "Compare activity between two days — active time, productivity, "
+                "captures. Use when the user asks 'how does today compare to yesterday' "
+                "or wants to compare any two dates."
+            ),
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "day1": {
+                        "type": "string",
+                        "description": "First date (YYYY-MM-DD or 'today', 'yesterday')",
+                    },
+                    "day2": {
+                        "type": "string",
+                        "description": "Second date (YYYY-MM-DD or 'today', 'yesterday')",
+                    },
+                },
+                "required": ["day1", "day2"],
+            },
+        ),
+        Tool(
+            name="get_trigger_events",
+            description=(
+                "Get recent trigger events — patterns detected on screen that matched "
+                "configured trigger rules. Use when the user asks about alerts or "
+                "automated detections."
+            ),
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "limit": {
+                        "type": "integer",
+                        "description": "Max events to return (default: 20)",
+                        "default": 20,
+                    },
+                },
+            },
+        ),
     ]
 
 
@@ -306,6 +394,73 @@ async def call_tool(name: str, arguments: dict[str, Any]) -> list[TextContent]:
             end_str = datetime.fromtimestamp(end_ts).strftime("%H:%M")
             result = f"Screen activity for '{when}' ({start_str} - {end_str}):\n\n"
             result += format_entries(entries)
+
+        elif name == "classify_activity":
+            minutes = arguments.get("minutes", 60)
+            entries = store.get_recent(minutes=minutes, limit=5000)
+            if not entries:
+                result = f"No captures in the last {minutes} minutes."
+            else:
+                categories = classify_batch(entries)
+                config = load_config()
+                interval = config.get("capture_interval", 10)
+                total = sum(c["count"] for c in categories.values())
+                productive = sum(c["productive_frames"] for c in categories.values())
+                prod_pct = round((productive / total) * 100, 1) if total else 0
+
+                lines = [f"Content classification (last {minutes} min, {len(entries)} captures):\n"]
+                for cat, info in sorted(categories.items(), key=lambda x: -x[1]["count"]):
+                    pct = round((info["count"] / total) * 100, 1)
+                    est_min = round((info["count"] * interval) / 60, 1)
+                    prod_mark = " [productive]" if info["productive_frames"] > info["count"] * 0.5 else ""
+                    lines.append(f"  {cat}: {pct}% (~{est_min}min){prod_mark}")
+                    subs = info.get("subcategories", {})
+                    for sub, count in sorted(subs.items(), key=lambda x: -x[1])[:3]:
+                        if sub:
+                            lines.append(f"    - {sub}: {count} frames")
+                    kws = info.get("top_keywords", [])
+                    if kws:
+                        lines.append(f"    keywords: {', '.join(kws[:6])}")
+                lines.append(f"\nProductivity: {prod_pct}%")
+                result = "\n".join(lines)
+
+        elif name == "get_daily_digest":
+            date_str = arguments.get("date")
+            if date_str:
+                from datetime import datetime as dt_cls
+                date = dt_cls.strptime(date_str, "%Y-%m-%d")
+            else:
+                date = None
+            result = generate_daily_digest(store, date)
+
+        elif name == "get_weekly_digest":
+            result = generate_weekly_digest(store)
+
+        elif name == "compare_days":
+            from datetime import datetime as dt_cls, timedelta as td
+            def parse_day(s):
+                s = s.strip().lower()
+                today = dt_cls.now().replace(hour=0, minute=0, second=0, microsecond=0)
+                if s == "today":
+                    return today
+                elif s == "yesterday":
+                    return today - td(days=1)
+                else:
+                    return dt_cls.strptime(s, "%Y-%m-%d")
+            day1 = parse_day(arguments["day1"])
+            day2 = parse_day(arguments["day2"])
+            result = compare_days(store, day1, day2)
+
+        elif name == "get_trigger_events":
+            from pathlib import Path
+            limit = arguments.get("limit", 20)
+            log_path = Path.home() / ".claude-eyes" / "triggers.log"
+            if log_path.exists():
+                lines = log_path.read_text().strip().split("\n")
+                recent = lines[-limit:] if len(lines) > limit else lines
+                result = f"Recent trigger events ({len(recent)}):\n\n" + "\n".join(recent)
+            else:
+                result = "No trigger events recorded yet."
 
         else:
             result = f"Unknown tool: {name}"
