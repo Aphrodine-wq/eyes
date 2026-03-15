@@ -1,0 +1,7 @@
+pyobjc-core>=10.0
+pyobjc-framework-Vision>=10.0
+pyobjc-framework-Quartz>=10.0
+Pillow>=10.0
+imagehash>=4.3
+anthropic>=0.40.0
+mcp>=1.0.0

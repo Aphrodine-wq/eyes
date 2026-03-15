@@ -1,0 +1,48 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  Install:
+    cp com.claude-eyes.watcher.plist ~/Library/LaunchAgents/
+    launchctl load ~/Library/LaunchAgents/com.claude-eyes.watcher.plist
+
+  Uninstall:
+    launchctl unload ~/Library/LaunchAgents/com.claude-eyes.watcher.plist
+    rm ~/Library/LaunchAgents/com.claude-eyes.watcher.plist
+
+  NOTE: Update the ProgramArguments paths below to match your install location.
+-->
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.claude-eyes.watcher</string>
+
+    <key>ProgramArguments</key>
+    <array>
+        <string>/usr/bin/env</string>
+        <string>python3</string>
+        <string>/Users/YOU/claude-eyes/eyes.py</string>
+        <string>watch</string>
+        <string>--interval</string>
+        <string>10</string>
+    </array>
+
+    <key>RunAtLoad</key>
+    <true/>
+
+    <key>KeepAlive</key>
+    <true/>
+
+    <key>StandardOutPath</key>
+    <string>/tmp/claude-eyes.stdout.log</string>
+
+    <key>StandardErrorPath</key>
+    <string>/tmp/claude-eyes.stderr.log</string>
+
+    <key>WorkingDirectory</key>
+    <string>/Users/YOU/claude-eyes</string>
+
+    <!-- Throttle restarts to every 10 seconds if it crashes -->
+    <key>ThrottleInterval</key>
+    <integer>10</integer>
+</dict>
+</plist>
