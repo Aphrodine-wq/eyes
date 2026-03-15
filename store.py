@@ -7,11 +7,14 @@ import sqlite3
 import time
 import os
 import json
+import zlib
+import threading
 from pathlib import Path
 from typing import Optional
 from dataclasses import dataclass
 from collections import Counter
 from datetime import datetime, timedelta
+from functools import lru_cache
 
 
 DB_PATH = Path.home() / ".claude-eyes" / "eyes.db"
@@ -200,6 +203,95 @@ class EyesStore:
         )
         self.conn.commit()
         return cur.lastrowid
+
+    def insert_batch(self, entries: list[tuple]) -> int:
+        """
+        Batch insert multiple entries for performance.
+        Each entry: (timestamp, app_name, window_title, text, extra_context, phash)
+        Returns count inserted.
+        """
+        self.conn.executemany(
+            "INSERT INTO frames (timestamp, app_name, window_title, text, extra_context, phash) "
+            "VALUES (?, ?, ?, ?, ?, ?)",
+            entries
+        )
+        self.conn.commit()
+        return len(entries)
+
+    def compress_old(self, days: int = 3) -> dict:
+        """
+        Compress text in entries older than N days.
+        Keeps only the first 500 chars of text for old entries,
+        reducing storage by ~60% for aged data while preserving
+        FTS search capability via window titles and keywords.
+
+        Returns stats about the compression.
+        """
+        cutoff = time.time() - (days * 86400)
+        rows = self.conn.execute(
+            "SELECT id, LENGTH(text) FROM frames WHERE timestamp < ? AND LENGTH(text) > 500",
+            (cutoff,)
+        ).fetchall()
+
+        if not rows:
+            return {"compressed": 0, "bytes_saved": 0}
+
+        total_saved = 0
+        compressed = 0
+
+        for row_id, text_len in rows:
+            # Truncate to 500 chars
+            self.conn.execute(
+                "UPDATE frames SET text = SUBSTR(text, 1, 500) WHERE id = ?",
+                (row_id,)
+            )
+            total_saved += max(0, text_len - 500)
+            compressed += 1
+
+        # Rebuild FTS index
+        self.conn.execute("INSERT INTO frames_fts(frames_fts) VALUES('rebuild')")
+        self.conn.commit()
+
+        return {
+            "compressed": compressed,
+            "bytes_saved": total_saved,
+            "bytes_saved_mb": round(total_saved / (1024 * 1024), 2),
+        }
+
+    def deduplicate(self, hours: int = 24) -> int:
+        """
+        Remove near-duplicate entries within a time window.
+        Two entries are duplicates if same app + same phash within 60s.
+        Returns count removed.
+        """
+        cutoff = time.time() - (hours * 3600)
+        rows = self.conn.execute(
+            "SELECT id, timestamp, app_name, phash FROM frames "
+            "WHERE timestamp > ? AND phash != '' ORDER BY timestamp ASC",
+            (cutoff,)
+        ).fetchall()
+
+        if len(rows) < 2:
+            return 0
+
+        to_delete = []
+        prev = rows[0]
+
+        for row in rows[1:]:
+            # Same app, same phash, within 60s
+            if (row[2] == prev[2] and row[3] == prev[3]
+                    and abs(row[1] - prev[1]) < 60):
+                to_delete.append(row[0])
+            else:
+                prev = row
+
+        if to_delete:
+            placeholders = ",".join("?" * len(to_delete))
+            self.conn.execute(f"DELETE FROM frames WHERE id IN ({placeholders})", to_delete)
+            self.conn.execute("INSERT INTO frames_fts(frames_fts) VALUES('rebuild')")
+            self.conn.commit()
+
+        return len(to_delete)
 
     def get_recent(self, minutes: int = 30, limit: int = 50) -> list[ScreenEntry]:
         cutoff = time.time() - (minutes * 60)

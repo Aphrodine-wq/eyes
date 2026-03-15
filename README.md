@@ -87,6 +87,22 @@ Add to your Claude Desktop config (`~/Library/Application Support/Claude/claude_
 | `get_sessions` | Detect work sessions with gaps, show start/end and focus |
 | `classify_activity` | Classify captures into categories (code, chat, browser, etc.) with productivity score |
 
+**Intelligence:**
+| Tool | What it does |
+|---|---|
+| `detect_flow_state` | Real-time cognitive state: deep focus, flow, scattered |
+| `get_attention_profile` | Peak focus hours, distraction patterns, flow habits |
+| `get_context_chain` | How information flowed across apps to get you here |
+| `find_forgotten_context` | Phantom memory — relevant things you saw hours ago |
+| `predict_next_app` | What app you'll likely switch to next |
+| `detect_workflows` | Your recurring app sequences (research-to-code, etc.) |
+| `detect_anomalies` | What's different about today vs your 7-day baseline |
+| `get_flow_breakers` | What interrupted your deep focus |
+| `semantic_search` | TF-IDF conceptual search (finds related content without exact keywords) |
+| `get_topic_map` | Cluster your activity into semantic themes |
+| `get_timeline` | Rich narrative timeline with diffs, errors, notifications |
+| `get_insights` | Deep behavioral analysis — habit loops, correlations, recommendations |
+
 **Reports:**
 | Tool | What it does |
 |---|---|
@@ -94,6 +110,7 @@ Add to your Claude Desktop config (`~/Library/Application Support/Claude/claude_
 | `get_weekly_digest` | 7-day comparison — trends, daily averages, productivity patterns |
 | `compare_days` | Side-by-side comparison of any two days |
 | `get_trigger_events` | Recent screen content trigger matches |
+| `optimize_database` | Compress old entries, deduplicate, reclaim space |
 
 ## CLI
 
@@ -294,7 +311,7 @@ eyes/
   eyes.py              # CLI and watcher loop (18 commands)
   capture.py           # Screenshot + OCR engine (Vision framework + tesseract)
   store.py             # SQLite + FTS5, sessions, focus stats, natural time parsing
-  mcp_server.py        # MCP server (22 tools)
+  mcp_server.py        # MCP server (27 tools)
   classifier.py        # Content classification (8 categories, keyword extraction)
   adaptive.py          # Adaptive capture rate (EMA, burst/idle detection)
   triggers.py          # Screen content triggers (regex -> actions)
@@ -302,6 +319,9 @@ eyes/
   flow.py              # Flow state detection, attention profiling
   context_chain.py     # Cross-app context tracking, forgotten context surfacing
   patterns.py          # Workflow fingerprinting, anomaly detection, predictions
+  semantic.py          # TF-IDF search, topic modeling (no ML dependencies)
+  timeline.py          # Screen diff narratives, rich timeline reconstruction
+  insights.py          # Habit loops, correlations, productivity recommendations
   install.sh           # Setup script
   requirements.txt     # Python dependencies
   com.claude-eyes.watcher.plist  # macOS LaunchAgent
@@ -310,12 +330,18 @@ eyes/
 ### Engine pipeline (per capture)
 
 ```
-Screenshot -> OCR -> Store
-                 |-> Classifier (tag as code/chat/browser/etc.)
-                 |-> Flow Detector (update flow state score)
-                 |-> Context Tracker (track cross-app information flow)
-                 |-> Trigger Engine (pattern match -> fire actions)
-                 |-> Adaptive Rate (adjust next capture interval)
+Screenshot -> OCR -> Dedup Check -> Store
+                                |-> Classifier (tag as code/chat/browser/etc.)
+                                |-> Flow Detector (update cognitive state score)
+                                |-> Context Tracker (cross-app information flow)
+                                |-> Trigger Engine (pattern match -> fire actions)
+                                |-> Adaptive Rate (adjust next capture interval)
+
+On-demand (MCP tool calls):
+  Store -> TF-IDF Index -> Semantic Search / Topic Discovery
+  Store -> Timeline Builder -> Screen Diff Narratives
+  Store -> Insights Engine -> Habit Loops / Correlations / Recommendations
+  Store -> Pattern Engine -> Workflow Fingerprints / Anomalies / Predictions
 ```
 
 ## Requirements

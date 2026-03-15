@@ -30,11 +30,16 @@ from digest import generate_daily_digest, generate_weekly_digest, compare_days
 from flow import FlowDetector
 from context_chain import ContextTracker
 from patterns import PatternEngine
+from semantic import TFIDFIndex, TopicModeler
+from timeline import build_timeline
+from insights import InsightsEngine
 
 # Persistent engines (survive across MCP calls)
 _flow_detector = FlowDetector(window_minutes=15)
 _context_tracker = ContextTracker(window_size=200)
 _pattern_engine = PatternEngine()
+_tfidf_index = TFIDFIndex()
+_insights_engine = InsightsEngine()
 
 server = Server("claude-eyes")
 
@@ -410,6 +415,98 @@ async def list_tools() -> list[Tool]:
             inputSchema={"type": "object", "properties": {}},
         ),
         Tool(
+            name="semantic_search",
+            description=(
+                "Semantic search using TF-IDF — finds conceptually related captures "
+                "even when exact keywords don't match. Better than text search for "
+                "vague queries like 'that thing about authentication' or 'the deployment issue'."
+            ),
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "query": {
+                        "type": "string",
+                        "description": "Natural language query describing what to find",
+                    },
+                    "minutes": {
+                        "type": "integer",
+                        "description": "How far back to search (default: 120)",
+                        "default": 120,
+                    },
+                },
+                "required": ["query"],
+            },
+        ),
+        Tool(
+            name="get_topic_map",
+            description=(
+                "Discover topic clusters from screen activity — groups captures "
+                "into semantic themes. Shows what topics you've been working on, "
+                "with keywords, apps, and coherence scores."
+            ),
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "minutes": {
+                        "type": "integer",
+                        "description": "Time range to analyze (default: 240)",
+                        "default": 240,
+                    },
+                    "n_topics": {
+                        "type": "integer",
+                        "description": "Number of topics to discover (default: 6)",
+                        "default": 6,
+                    },
+                },
+            },
+        ),
+        Tool(
+            name="get_timeline",
+            description=(
+                "Reconstruct a rich timeline of screen activity — app switches, "
+                "content changes, errors detected, notifications. Shows the narrative "
+                "of what happened, not raw OCR dumps. Use for understanding the flow "
+                "of a work session."
+            ),
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "minutes": {
+                        "type": "integer",
+                        "description": "Time range (default: 60)",
+                        "default": 60,
+                    },
+                },
+            },
+        ),
+        Tool(
+            name="get_insights",
+            description=(
+                "Generate deep behavioral insights — habit loops, app correlations, "
+                "peak productive hours, context switch cost, and actionable recommendations. "
+                "Needs 3+ days of data. Use when the user asks 'give me insights' or "
+                "'how can I be more productive'."
+            ),
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "days": {
+                        "type": "integer",
+                        "description": "Days of history to analyze (default: 7)",
+                        "default": 7,
+                    },
+                },
+            },
+        ),
+        Tool(
+            name="optimize_database",
+            description=(
+                "Run storage optimizations — compress old entries, remove duplicates, "
+                "reclaim space. Returns stats on bytes saved."
+            ),
+            inputSchema={"type": "object", "properties": {}},
+        ),
+        Tool(
             name="get_flow_breakers",
             description=(
                 "Identify what broke the user's focus — which apps interrupted deep focus "
@@ -718,6 +815,110 @@ async def call_tool(name: str, arguments: dict[str, Any]) -> list[TextContent]:
                 result = "\n".join(lines)
             else:
                 result = "No anomalies detected. Today looks normal compared to your 7-day baseline."
+
+        elif name == "semantic_search":
+            query = arguments["query"]
+            minutes = arguments.get("minutes", 120)
+            entries = store.get_recent(minutes=minutes, limit=2000)
+            if not entries:
+                result = "No captures to search."
+            else:
+                _tfidf_index.build(entries)
+                results = _tfidf_index.search(query, top_k=10)
+                if not results:
+                    result = f"No semantic matches for '{query}'."
+                else:
+                    entry_map = {e.id: e for e in entries}
+                    lines = [f"Semantic search: '{query}' ({len(results)} matches):\n"]
+                    for doc_id, sim, shared in results:
+                        e = entry_map.get(doc_id)
+                        if e:
+                            ts = datetime.fromtimestamp(e.timestamp).strftime("%H:%M")
+                            preview = (e.text or "")[:120].replace("\n", " ")
+                            lines.append(f"  [{ts}] {e.app_name} (sim: {sim:.2f})")
+                            lines.append(f"    {preview}")
+                            if shared:
+                                lines.append(f"    shared: {', '.join(shared[:6])}")
+                    result = "\n".join(lines)
+
+        elif name == "get_topic_map":
+            minutes = arguments.get("minutes", 240)
+            n_topics = arguments.get("n_topics", 6)
+            entries = store.get_recent(minutes=minutes, limit=3000)
+            if not entries:
+                result = "No captures for topic analysis."
+            else:
+                _tfidf_index.build(entries)
+                modeler = TopicModeler(_tfidf_index)
+                topics = modeler.discover_topics(entries, n_topics)
+                if not topics:
+                    result = "Not enough data to discover topics."
+                else:
+                    lines = [f"Topic map (last {minutes}min, {len(topics)} topics):\n"]
+                    for t in topics:
+                        from datetime import datetime as dt_cls
+                        start = dt_cls.fromtimestamp(t.time_range[0]).strftime("%H:%M")
+                        end = dt_cls.fromtimestamp(t.time_range[1]).strftime("%H:%M")
+                        lines.append(f"  Topic: {t.label}")
+                        lines.append(f"    Frames: {t.frame_count} | Apps: {', '.join(t.apps[:3])}")
+                        lines.append(f"    Time: {start}-{end} | Coherence: {t.coherence}")
+                        lines.append(f"    Keywords: {', '.join(t.keywords[:6])}\n")
+                    result = "\n".join(lines)
+
+        elif name == "get_timeline":
+            minutes = arguments.get("minutes", 60)
+            entries = store.get_recent(minutes=minutes, limit=1000)
+            if not entries:
+                result = "No captures for timeline."
+            else:
+                entries_sorted = sorted(entries, key=lambda e: e.timestamp)
+                tl = build_timeline(entries_sorted)
+                result = tl.render(max_events=40)
+
+        elif name == "get_insights":
+            days = arguments.get("days", 7)
+            report = _insights_engine.generate_report(store, days)
+
+            lines = [f"Behavioral Insights ({days}-day analysis):\n"]
+
+            if report.peak_hours:
+                lines.append(f"Peak productive hours: {', '.join(f'{h}:00' for h in report.peak_hours)}")
+            if report.dead_hours:
+                lines.append(f"Least productive hours: {', '.join(f'{h}:00' for h in report.dead_hours)}")
+            if report.most_productive_day:
+                lines.append(f"Most productive day: {report.most_productive_day}")
+            lines.append(f"Avg focus session: {report.avg_deep_focus_duration}min")
+            lines.append(f"Context switch recovery: ~{report.context_switch_cost_minutes}min")
+
+            if report.habit_loops:
+                lines.append(f"\nHabit Loops ({len(report.habit_loops)}):")
+                for loop in report.habit_loops[:5]:
+                    lines.append(f"  - {loop.description}")
+
+            if report.correlations:
+                lines.append(f"\nCorrelations ({len(report.correlations)}):")
+                for corr in report.correlations[:5]:
+                    lines.append(f"  - {corr.description} (r={corr.correlation})")
+
+            if report.recommendations:
+                lines.append(f"\nRecommendations:")
+                for rec in report.recommendations:
+                    lines.append(f"  [{rec.impact.upper()}] {rec.title}")
+                    lines.append(f"    {rec.description}")
+                    lines.append(f"    Evidence: {rec.evidence}")
+
+            result = "\n".join(lines)
+
+        elif name == "optimize_database":
+            compress_stats = store.compress_old(days=3)
+            dedup_count = store.deduplicate(hours=24)
+            stats = store.stats()
+            result = (
+                f"Database optimization complete:\n"
+                f"  Compressed: {compress_stats['compressed']} entries ({compress_stats['bytes_saved_mb']}MB saved)\n"
+                f"  Deduplicated: {dedup_count} near-duplicate entries removed\n"
+                f"  Database size: {stats['db_size_mb']}MB ({stats['total_frames']} frames)"
+            )
 
         elif name == "get_flow_breakers":
             minutes = arguments.get("minutes", 120)
